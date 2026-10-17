@@ -37,7 +37,7 @@ loginctl enable-linger "$USER"
 
 ```bash
 ./scripts/install-quadlet.sh \
-  --image ghcr.io/KashWan/qbittorrentee:latest
+  --image ghcr.io/KashWan/qbittorrentee-rootless:latest
 ```
 
 它会：建 `~/qbt/{config,downloads}` → 渲染单元到 `~/.config/containers/systemd/` → `daemon-reload` → 启动。
@@ -45,7 +45,7 @@ loginctl enable-linger "$USER"
 先看看会生成什么：
 
 ```bash
-./scripts/install-quadlet.sh --image ghcr.io/you/qbittorrentee:latest --dry-run
+./scripts/install-quadlet.sh --image ghcr.io/you/qbittorrentee-rootless:latest --dry-run
 ```
 
 ### 3.2 手工装
@@ -70,7 +70,7 @@ systemctl --user enable qbittorrentee
 ```ini
 [Container]
 ContainerName=qbittorrentee
-Image=ghcr.io/you/qbittorrentee:latest
+Image=ghcr.io/you/qbittorrentee-rootless:latest
 AutoUpdate=registry              # podman auto-update 会检查并拉新
 
 Environment=PUID=0               # ← rootless 的关键

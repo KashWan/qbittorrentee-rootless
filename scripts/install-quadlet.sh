@@ -4,7 +4,7 @@
 #
 #  用法：
 #      ./scripts/install-quadlet.sh                      # 交互式默认值
-#      ./scripts/install-quadlet.sh --image ghcr.io/me/qbittorrentee:5.2.4.10
+#      ./scripts/install-quadlet.sh --image ghcr.io/me/qbittorrentee-rootless:5.2.4.10
 #      ./scripts/install-quadlet.sh --dry-run
 #
 #  做的事：
@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-[[ -n "${IMAGE}" ]] || die "请用 --image 指定镜像，例如 --image ghcr.io/you/qbittorrentee:latest"
+[[ -n "${IMAGE}" ]] || die "请用 --image 指定镜像，例如 --image ghcr.io/you/qbittorrentee-rootless:latest"
 [[ "$(id -u)" -ne 0 ]] || die "请以普通用户运行（rootless），不要用 sudo"
 
 TEMPLATE="$(cd "$(dirname "$0")/.." && pwd)/quadlet/${UNIT_NAME}"
@@ -50,7 +50,7 @@ mkdir -p "${CONFIG_DIR}" "${DOWNLOADS_DIR}" "${UNIT_DIR}"
 
 rendered="$(
 	sed \
-		-e "s|ghcr.io/YOUR_GITHUB_USER/qbittorrentee:latest|${IMAGE}|" \
+		-e "s|ghcr.io/KashWan/qbittorrentee-rootless:latest|${IMAGE}|" \
 		-e "s|^Environment=WEBUI_PORT=.*|Environment=WEBUI_PORT=${WEBUI_PORT}|" \
 		-e "s|^Environment=TZ=.*|Environment=TZ=${TZ_VALUE}|" \
 		-e "s|^Volume=%h/qbt/config:/config:Z|Volume=${CONFIG_DIR}:/config:Z|" \

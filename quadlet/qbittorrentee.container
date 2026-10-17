@@ -14,13 +14,13 @@
 
 [Unit]
 Description=qBittorrent Enhanced Edition (rootless · s6-overlay v3)
-Documentation=https://github.com/YOUR_GITHUB_USER/qbittorrentee
+Documentation=https://github.com/KashWan/qbittorrentee-rootless
 Wants=network-online.target
 After=network-online.target
 
 [Container]
 ContainerName=qbittorrentee
-Image=ghcr.io/YOUR_GITHUB_USER/qbittorrentee:latest
+Image=ghcr.io/KashWan/qbittorrentee-rootless:latest
 AutoUpdate=registry
 
 # ---------------------------------------------------------------------------

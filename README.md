@@ -3,7 +3,7 @@
 > s6-overlay **v3** 作为 PID 1，**PUID/PGID 真正生效**，原生适配 **rootless Podman + Quadlet**，
 > GitHub Actions 自动跟踪上游版本并推送到 GHCR。
 
-镜像地址：`ghcr.io/KashWan/qbittorrentee`
+镜像地址：`ghcr.io/KashWan/qbittorrentee-rootless`
 
 ---
 
@@ -65,7 +65,7 @@ podman run -d --name qbittorrentee \
   -e PUID=0 -e PGID=0 -e UMASK=002 \
   -v ~/qbt/config:/config:Z \
   -v ~/qbt/downloads:/downloads:Z \
-  ghcr.io/KashWan/qbittorrentee:latest
+  ghcr.io/KashWan/qbittorrentee-rootless:latest
 ```
 
 首次启动 qBittorrent 会生成**一次性随机密码**并打印在日志里：
@@ -80,7 +80,7 @@ podman logs qbittorrentee | grep -i "temporary password"
 
 ```bash
 git clone <本仓库> && cd qbittorrentee
-./scripts/install-quadlet.sh --image ghcr.io/KashWan/qbittorrentee:latest
+./scripts/install-quadlet.sh --image ghcr.io/KashWan/qbittorrentee-rootless:latest
 loginctl enable-linger "$USER"      # 未登录也能跑
 journalctl --user -u qbittorrentee -f
 ```
@@ -93,7 +93,7 @@ journalctl --user -u qbittorrentee -f
 ```yaml
 services:
   qbittorrentee:
-    image: ghcr.io/KashWan/qbittorrentee:latest
+    image: ghcr.io/KashWan/qbittorrentee-rootless:latest
     environment:
       PUID: 1000
       PGID: 1000

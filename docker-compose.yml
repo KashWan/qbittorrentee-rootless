@@ -7,7 +7,7 @@
 
 services:
   qbittorrentee:
-    image: ghcr.io/YOUR_GITHUB_USER/qbittorrentee:latest
+    image: ghcr.io/KashWan/qbittorrentee-rootless:latest
     container_name: qbittorrentee
     restart: unless-stopped
 
