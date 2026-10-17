@@ -37,9 +37,14 @@ jobs:
             -s bash -x \
             scripts/resolve-upstream.sh \
             scripts/install-quadlet.sh \
+            scripts/check-dockerfile-runs.sh \
             tests/smoke.sh \
             tests/rootless.sh \
             tests/resolve-upstream.sh
+
+      # 把每个 RUN 块抽出来交给 `sh -n`：拦截引号不闭合这类只有 build 才会暴露的错误
+      - name: Dockerfile RUN 语法检查
+        run: bash scripts/check-dockerfile-runs.sh Dockerfile
 
       - name: Hadolint
         run: |

@@ -3,8 +3,10 @@ name: build
 # =============================================================================
 #  上游有新版本时自动构建并推送；代码变更时重建 edge。
 #
-#  流程：resolve（查版本 + 查 GHCR 是否已有） → build（多架构推送，仅不可变
-#  标签） → 冒烟测试 → 冒烟通过后才把 5.2 / 5 / latest 指过去。
+#  只构建 linux/amd64 —— 不使用 QEMU，构建耗时 ≈ 1 分钟。
+#
+#  流程：resolve（查版本 + 查 GHCR 是否已有） → build（推送，仅不可变标签）
+#  → 冒烟测试 → 冒烟通过后才把 5.2 / 5 / latest 指过去。
 #  这样 latest 永远不会指向一个没跑通的镜像。
 # =============================================================================
 
@@ -87,7 +89,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
-  # 2. 多架构构建 + 推送
+  # 2. 构建 + 推送（linux/amd64）
   # ---------------------------------------------------------------------------
   build:
     needs: resolve
@@ -95,11 +97,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: 启用 QEMU（arm64 / armv7）
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64,arm
 
       - uses: docker/setup-buildx-action@v3
 
@@ -114,7 +111,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          platforms: linux/amd64
           push: true
           pull: true
           tags: ${{ needs.resolve.outputs.tags }}
@@ -125,8 +122,12 @@ jobs:
             VCS_REF=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
+          # attestation（provenance/sbom）会额外生成 unknown/unknown 平台的 manifest，
+          # 老版本 Podman（Ubuntu 22.04 自带 3.4）拉取时可能报
+          # "no image found in manifest list for architecture"。单架构镜像不需要它，
+          # 关掉可以保证 podman / Quadlet 各版本都能直接 pull。
+          provenance: false
+          sbom: false
 
       - name: 冒烟测试（在 amd64 上跑真实容器）
         env:
@@ -165,7 +166,7 @@ jobs:
             printf '%s\n' "${ALIASES}"
             echo '```'
             echo ""
-            echo "平台：linux/amd64 · linux/arm64 · linux/arm/v7"
+            echo "平台：linux/amd64"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
@@ -182,6 +183,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq podman uidmap
+
+      - name: 拉取镜像（私有包需要登录，Public 包也能走这条路）
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          podman pull "${IMAGE}"
 
       - name: rootless 冒烟
         env:

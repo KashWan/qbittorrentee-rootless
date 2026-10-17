@@ -24,7 +24,8 @@ fail() { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
 	podman rm -f qbt-rootless-1 qbt-rootless-2 >/dev/null 2>&1 || true
-	rm -rf "${WORK}"
+	# 数据目录里可能有 subuid 属主（PUID 场景），普通用户删不掉 → 借 userns 删
+	podman unshare rm -rf "${WORK}" >/dev/null 2>&1 || rm -rf "${WORK}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -38,6 +39,16 @@ podman image exists "${IMAGE}" 2>/dev/null || skip "本地没有镜像 ${IMAGE}"
 
 echo "镜像：${IMAGE}"
 echo "当前用户：$(id -un) uid=$(id -u) gid=$(id -g)"
+
+# 检查容器日志里是否出现某个字符串
+#   不能写成 `podman logs | grep -q`：脚本开了 pipefail，grep -q 提前退出会让
+#   podman logs 收到 SIGPIPE（141），整条管道被判为失败 —— 明明有日志却「匹配不到」。
+logs_contain() {
+	local out
+	out="$(podman logs "$1" 2>&1 || true)"
+	[ -n "${out}" ] || return 1
+	grep -qF -- "$2" <<<"${out}"
+}
 
 wait_up() {
 	for _ in $(seq 1 45); do
@@ -71,7 +82,7 @@ podman run -d --name qbt-rootless-1 \
 if wait_up qbt-rootless-1 && sleep 8; then
 	pass "容器已启动"
 
-	if podman logs qbt-rootless-1 2>&1 | grep -q "场景：rootless"; then
+	if logs_contain qbt-rootless-1 "场景：rootless"; then
 		pass "识别为 rootless userns"
 	else
 		fail "未识别为 rootless userns（日志缺少「场景：rootless」）"
@@ -106,7 +117,7 @@ podman run -d --name qbt-rootless-2 \
 	"${IMAGE}" >/dev/null
 
 if wait_up qbt-rootless-2 && sleep 8; then
-	if podman logs qbt-rootless-2 2>&1 | grep -q "rootless userns 下 PUID=1000"; then
+	if logs_contain qbt-rootless-2 "rootless userns 下 PUID=1000"; then
 		pass "已给出「PUID 会映射到 subuid」的警告"
 	else
 		fail "缺少 PUID 映射警告（用户会以为配置又没生效）"

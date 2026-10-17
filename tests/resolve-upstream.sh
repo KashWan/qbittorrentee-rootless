@@ -90,8 +90,7 @@ cat > "${TMP}/release.json" <<'JSON'
   "prerelease": false,
   "assets": [
     {"name": "qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"},
-    {"name": "qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip"},
-    {"name": "qbittorrent-enhanced-nox_armv7-linux-musleabihf_static.zip"}
+    {"name": "qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip"}
   ]
 }
 JSON
@@ -102,7 +101,7 @@ cat > "${TMP}/release-missing.json" <<'JSON'
   "published_at": "2026-10-10T00:00:00Z",
   "prerelease": false,
   "assets": [
-    {"name": "qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"}
+    {"name": "qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip"}
   ]
 }
 JSON
@@ -111,8 +110,7 @@ export PATH="${TMP}/bin:${PATH}"
 export FAKE_TAG_JSON="${TMP}/release.json"
 export FAKE_LIST_JSON="${TMP}/release.json"
 export FAKE_ASSETS="qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip
-qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip
-qbittorrent-enhanced-nox_armv7-linux-musleabihf_static.zip"
+qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip"
 
 run_case() { # $1 输出文件
 	# 前缀赋值作用于 bash 子进程（对函数调用本身的赋值不会自动 export）
@@ -174,12 +172,12 @@ else
 	pass "非法版本号被拒绝"
 fi
 
-echo "== 用例 5：上游缺资产应失败（防止产出残缺多架构镜像）=="
+echo "== 用例 5：上游缺 x86_64 静态包应失败 =="
 : > "${TMP}/out/5"
 if FAKE_TAG_JSON="${TMP}/release-missing.json" \
 	FAKE_LIST_JSON="${TMP}/release-missing.json" \
 	FAKE_TAG="release-5.2.4.11" \
-	FAKE_ASSETS="qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip" \
+	FAKE_ASSETS="qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip" \
 	FORCE=true EVENT_NAME=schedule run_case "${TMP}/out/5"; then
 	fail "缺资产竟然通过了"
 elif grep -q "缺少必需资产" "${TMP}/log"; then

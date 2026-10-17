@@ -5,15 +5,15 @@
 IMAGE       ?= qbittorrentee:dev
 VERSION     ?= 5.2.4.10
 S6_VERSION  ?= 3.2.3.2
-PLATFORMS   ?= linux/amd64,linux/arm64,linux/arm/v7
+PLATFORMS   ?= linux/amd64
 RUNTIME     ?= docker
 
-.PHONY: help build build-multi test test-rootless identity check run shell clean push
+.PHONY: help build buildx test test-rootless identity check run shell clean
 
 help:
 	@printf '%s\n' \
-	  'make build         构建本机架构镜像（$(IMAGE)，上游 $(VERSION)）' \
-	  'make build-multi   用 buildx 构建多架构（不推送）' \
+	  'make build         构建镜像（$(IMAGE)，上游 $(VERSION)）' \
+	  'make buildx        用 buildx 构建 linux/amd64（与 CI 一致，不推送）' \
 	  'make test          冒烟测试（A/B/C 三组用例）' \
 	  'make test-rootless rootless podman 行为验证' \
 	  'make identity      身份解析单元测试（无需容器）' \
@@ -24,11 +24,12 @@ help:
 
 build:
 	$(RUNTIME) build \
+	  --platform linux/amd64 \
 	  --build-arg QBITTORRENT_VERSION=$(VERSION) \
 	  --build-arg S6_OVERLAY_VERSION=$(S6_VERSION) \
 	  -t $(IMAGE) .
 
-build-multi:
+buildx:
 	$(RUNTIME) buildx build \
 	  --platform $(PLATFORMS) \
 	  --build-arg QBITTORRENT_VERSION=$(VERSION) \
@@ -51,6 +52,8 @@ check:
 	@echo "== sh -n =="
 	@for f in rootfs/usr/local/bin/*.sh rootfs/etc/cont-init.d/* rootfs/etc/services.d/*/run \
 	          rootfs/etc/services.d/*/finish; do printf '%-40s' "$$f"; sh -n "$$f" && echo OK; done
+	@echo "== Dockerfile 的 RUN 块 =="
+	@bash scripts/check-dockerfile-runs.sh Dockerfile
 	@make identity
 
 run:

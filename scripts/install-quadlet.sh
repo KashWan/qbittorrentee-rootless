@@ -42,9 +42,22 @@ done
 TEMPLATE="$(cd "$(dirname "$0")/.." && pwd)/quadlet/${UNIT_NAME}"
 [[ -r "${TEMPLATE}" ]] || die "找不到模板：${TEMPLATE}"
 
+# podman 的 AutoUpdate=registry 要求镜像是「全限定引用」（含 registry/repo）。
+# 本地构建的短名（qbittorrentee:dev）会让单元直接启动失败：
+#   Error: short name: auto updates require fully-qualified image reference
+# 所以短名时自动去掉 AutoUpdate，并明确告知。
+DROP_AUTOUPDATE=0
+case "${IMAGE}" in
+	*/*) : ;;
+	*)   DROP_AUTOUPDATE=1 ;;
+esac
+
 info "镜像：${IMAGE}"
 info "配置：${CONFIG_DIR}"
 info "下载：${DOWNLOADS_DIR}"
+if [[ "${DROP_AUTOUPDATE}" -eq 1 ]]; then
+	info "注意：${IMAGE} 不是全限定镜像名，已去掉 AutoUpdate=registry"
+fi
 
 mkdir -p "${CONFIG_DIR}" "${DOWNLOADS_DIR}" "${UNIT_DIR}"
 
@@ -57,6 +70,10 @@ rendered="$(
 		-e "s|^Volume=%h/qbt/downloads:/downloads:Z|Volume=${DOWNLOADS_DIR}:/downloads:Z|" \
 		"${TEMPLATE}"
 )"
+
+if [[ "${DROP_AUTOUPDATE}" -eq 1 ]]; then
+	rendered="$(printf '%s\n' "${rendered}" | sed '/^AutoUpdate=registry$/d')"
+fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
 	echo "--- 将要写入 ${UNIT_DIR}/${UNIT_NAME} ---"

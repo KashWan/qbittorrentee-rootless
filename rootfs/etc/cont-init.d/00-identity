@@ -19,6 +19,9 @@ set -eu
 
 . "${QBT_LIB:-/usr/local/bin/qbt-lib.sh}"
 
+# s6 v3 的 PID 1 环境是干净的，PUID/PGID 在 /run/s6/container_environment 里
+qbt_load_container_env
+
 STATE_DIR="${QBT_STATE_DIR:-/run/qbittorrentee}"
 STATE_FILE="${STATE_DIR}/state.env"
 CONFIG_DIR="${CONFIG_DIR:-/config}"

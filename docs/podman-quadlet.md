@@ -114,6 +114,17 @@ systemctl --user list-timers | grep podman
 `AutoUpdate=registry` 只对**标签**生效：`latest` 会被重新拉取；`5.2.4.10` 这种固定标签
 不会变化，也就不用更新 —— 这正是我们的标签策略想要的。
 
+> **注意：`AutoUpdate=registry` 要求镜像是「全限定引用」**（含 registry/repo，例如
+> `ghcr.io/kashwan/qbittorrentee-rootless:latest`）。如果写成短名 `qbittorrentee:dev`，
+> 单元会直接启动失败：
+>
+> ```
+> Error: short name: auto updates require fully-qualified image reference: "qbittorrentee:dev"
+> ```
+>
+> `scripts/install-quadlet.sh` 会自动识别短名并去掉这一行，同时在输出里提示；
+> 手工写单元时请自己注意。
+
 ---
 
 ## 6. 端口与网络

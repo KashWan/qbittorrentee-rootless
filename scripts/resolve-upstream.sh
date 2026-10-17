@@ -86,12 +86,10 @@ MAJOR="${BASH_REMATCH[1]}"
 MINOR="${BASH_REMATCH[2]}"
 
 # -----------------------------------------------------------------------------
-# 3. 校验静态包是否齐备（缺包就不构建，避免产出残缺的多架构镜像）
+# 3. 校验静态包是否齐备（只看 x86_64：本镜像只构建 linux/amd64）
 # -----------------------------------------------------------------------------
 need_assets=(
 	"qbittorrent-enhanced-nox_x86_64-linux-musl_static.zip"
-	"qbittorrent-enhanced-nox_aarch64-linux-musl_static.zip"
-	"qbittorrent-enhanced-nox_armv7-linux-musleabihf_static.zip"
 )
 missing=()
 for a in "${need_assets[@]}"; do
@@ -100,7 +98,7 @@ done
 if (( ${#missing[@]} > 0 )); then
 	die "上游 ${TAG} 缺少必需资产：${missing[*]}"
 fi
-note "静态包校验通过（x86_64 / aarch64 / armv7）"
+note "静态包校验通过（x86_64）"
 
 # -----------------------------------------------------------------------------
 # 4. 组装标签

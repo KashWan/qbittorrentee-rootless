@@ -109,6 +109,34 @@ RUN chmod +x /etc/services.d/mydaemon/run
 
 `run` 必须 `exec` 前台进程，否则 s6-supervise 会认为它立刻退出并重启。
 
+### ⚠️ 自己写的脚本读不到 `-e` 传进来的变量（必读）
+
+这是 s6-overlay v3 最容易踩的坑，也是本项目「PUID 配了却不生效」的真正根因：
+
+- stage1 会用**干净的环境**重新 `exec` 成 PID 1，`/proc/1/environ` 里只剩 `PATH`；
+- 用户 `-e` 传进来的变量被写进 `/run/s6/container_environment/`（每个变量一个文件）；
+- stage2 的 `cont-init.d` / `services.d` **默认不会自动导入**这些变量。
+
+所以 `PUID=1234` 明明在 `/run/s6/container_environment/PUID` 里躺着，
+脚本里 `${PUID}` 却是空的 —— 静默退回默认值，看起来就像「配置不生效」。
+
+本镜像的公共库里有一个函数解决它：
+
+```sh
+. /usr/local/bin/qbt-lib.sh
+qbt_load_container_env     # 之后 $PUID / $WEBUI_PORT / $TZ 才有值
+```
+
+它逐个读取 `/run/s6/container_environment/*` 并 `export`，已显式赋值的变量不覆盖。
+等价于官方的 `#!/usr/bin/with-contenv sh`，但不需要改 shebang，用户脚本里直接调用即可。
+
+验证方法：
+
+```bash
+docker exec <容器> cat /proc/1/environ | tr '\0' '\n'   # 只有 PATH —— 正常
+docker exec <容器> ls /run/s6/container_environment      # 你的变量都在这里
+```
+
 ---
 
 ## 5. 环境变量速查

@@ -9,6 +9,12 @@
 
 set -eu
 
+# s6-overlay v3 的 PID 1 用的是干净环境：WEBUI_PORT / QBT_EXTRA_ARGS / TZ
+# 只存在于 /run/s6/container_environment，必须显式导回来。
+# 不导的话 TZ 会退回 UTC（时间显示差 8 小时），WEBUI_PORT 也不生效。
+. "${QBT_LIB:-/usr/local/bin/qbt-lib.sh}"
+qbt_load_container_env
+
 STATE_FILE="${QBT_STATE_DIR:-/run/qbittorrentee}/state.env"
 if [ ! -r "${STATE_FILE}" ]; then
 	echo "[qbittorrent] 缺少 ${STATE_FILE}，stage2 初始化未完成" >&2

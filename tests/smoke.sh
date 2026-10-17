@@ -59,6 +59,16 @@ proc_gid() {
 		echo none' | tr -d '\r\n'
 }
 
+# 检查容器日志里是否出现某个字符串
+#   不能写成 `docker logs | grep -q`：脚本开了 pipefail，grep -q 提前退出会让
+#   logs 收到 SIGPIPE（141），整条管道被判为失败 —— 明明有日志却「匹配不到」。
+logs_contain() {
+	local out
+	out="$("${RUNTIME}" logs "$1" 2>&1 || true)"
+	[ -n "${out}" ] || return 1
+	grep -qF -- "$2" <<<"${out}"
+}
+
 wait_healthy() { # 容器名
 	local st
 	for _ in $(seq 1 60); do
@@ -119,13 +129,13 @@ if wait_healthy qbt-smoke-a; then
 
 	chk "WebUI HTTP 状态" "$(http_code "${PORT_A}")" "200"
 
-	if "${RUNTIME}" logs qbt-smoke-a 2>&1 | grep -q "场景：rootful"; then
+	if logs_contain qbt-smoke-a "场景：rootful"; then
 		pass "日志标识 rootful 场景"
 	else
 		fail "日志中缺少「场景：rootful」"
 	fi
 
-	if "${RUNTIME}" logs qbt-smoke-a 2>&1 | grep -q "运行身份：abc"; then
+	if logs_contain qbt-smoke-a "运行身份：abc"; then
 		pass "日志显示降权到 abc"
 	else
 		warn "日志未出现「运行身份：abc」（默认账号名可能不同）"
@@ -164,27 +174,33 @@ fi
 "${RUNTIME}" rm -f qbt-smoke-b >/dev/null 2>&1 || true
 
 # -----------------------------------------------------------------------------
-# 用例 C：非 root 启动（尽力而为）
+# 用例 C：非 root 启动（--user 指定一个真正的非 root uid）
+#
+#  注意：不能用 $(id -u) —— 在 root 下跑测试时那就是 --user 0:0，
+#  等价于 rootful，测不到「非 root 降级」这条路径。
 # -----------------------------------------------------------------------------
-log "用例 C：--user $(id -u):$(id -g) + 可写 /run tmpfs"
+TEST_UID=65534
+TEST_GID=65534
+log "用例 C：--user ${TEST_UID}:${TEST_GID} + 可写 /run tmpfs（预期 PUID 被忽略并告警）"
 PORT_C=$((BASE_PORT + 2))
 mkdir -p "${WORK}/c/config" "${WORK}/c/downloads"
 chmod -R 0777 "${WORK}/c"
 
 if "${RUNTIME}" run -d --name qbt-smoke-c \
-	--user "$(id -u):$(id -g)" \
-	--tmpfs "/run:rw,exec,mode=0755,uid=$(id -u),gid=$(id -g)" \
+	--user "${TEST_UID}:${TEST_GID}" \
+	--tmpfs "/run:rw,exec,mode=0755,uid=${TEST_UID},gid=${TEST_GID}" \
 	-p "127.0.0.1:${PORT_C}:8080" \
 	-v "${WORK}/c/config:/config" \
 	-v "${WORK}/c/downloads:/downloads" \
+	-e PUID=9999 -e PGID=9999 \
 	"${IMAGE}" >/dev/null 2>&1; then
 	if wait_healthy qbt-smoke-c; then
 		pass "非 root 启动可用"
-		chk "运行进程 uid" "$(proc_uid qbt-smoke-c)" "$(id -u)"
-		if "${RUNTIME}" logs qbt-smoke-c 2>&1 | grep -q "已忽略"; then
+		chk "运行进程 uid" "$(proc_uid qbt-smoke-c)" "${TEST_UID}"
+		if logs_contain qbt-smoke-c "已被忽略"; then
 			pass "PUID 被忽略时已明确告警"
 		else
-			warn "未看到 PUID 忽略告警"
+			fail "缺少「PUID 已被忽略」告警（用户会以为配置没生效）"
 		fi
 	else
 		warn "非 root 启动未通过健康检查（该模式为尽力支持，详见 docs/puid-pgid.md）"
