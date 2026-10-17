@@ -1,0 +1,9 @@
+failure-threshold: warning
+ignored:
+  # alpine 不锁包版本：升级靠 APK 仓库，锁死反而拿不到安全更新
+  - DL3018
+  # 我们希望 apt/apk 缓存清理与安装同层，这里已经手动 rm -rf
+  - DL3009
+trustedRegistries:
+  - docker.io
+  - ghcr.io

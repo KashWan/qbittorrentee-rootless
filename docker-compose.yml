@@ -1,0 +1,59 @@
+# =============================================================================
+#  docker compose / podman compose
+#
+#  用法：
+#      cp .env.example .env      # 按需改 PUID/PGID/端口，或者直接 export
+#      docker compose up -d
+#
+#  rootless Podman ：PUID/PGID 用 0（容器 root 即宿主当前用户，属主天然正确）
+#  rootful Docker  ：PUID/PGID 用你的 uid/gid（默认 1000:1000）
+#  所有值都可用 .env 或环境变量覆盖，见 .env.example
+# =============================================================================
+
+services:
+  qbittorrentee:
+    # 必须小写：大写会被 docker/podman 判为 invalid reference format
+    image: ghcr.io/kashwan/qbittorrentee-rootless:${IMAGE_TAG:-latest}
+    container_name: qbittorrentee
+    restart: unless-stopped
+
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      UMASK: "${UMASK:-022}"
+      WEBUI_PORT: ${WEBUI_PORT:-8080}
+      BT_PORT: ${BT_PORT:-6881}
+      TZ: ${TZ:-Asia/Shanghai}
+      # none | dir | recursive（rootless 下恒为 no-op）
+      CHOWN_DOWNLOADS: ${CHOWN_DOWNLOADS:-none}
+      SEED_CONFIG: ${SEED_CONFIG:-true}
+      QBITTORRENT_LOCALE: ${QBITTORRENT_LOCALE:-zh}
+      # 留空 = 不设置；需要访问额外磁盘组时填 gid 列表
+      EXTRA_GROUPS: ${EXTRA_GROUPS:-}
+      QBT_EXTRA_ARGS: ${QBT_EXTRA_ARGS:-}
+
+    ports:
+      # 容器内监听的端口就是 WEBUI_PORT，两侧必须是同一个值
+      - "${WEBUI_PORT:-8080}:${WEBUI_PORT:-8080}"
+      - "${BT_PORT:-6881}:${BT_PORT:-6881}"
+      - "${BT_PORT:-6881}:${BT_PORT:-6881}/udp"
+
+    volumes:
+      - ${CONFIG_DIR:-./config}:/config
+      - ${DOWNLOADS_DIR:-./downloads}:/downloads
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    # 大于 s6 的 S6_KILL_GRACETIME(15s)，让 qBittorrent 有时间落盘 resume 数据
+    stop_grace_period: 70s
+
+    # qBittorrent 在大量做种时会用掉较多 fd
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536

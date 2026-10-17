@@ -1,0 +1,142 @@
+name: validate
+
+# 只在 PR 与手动触发时跑：main 的构建/测试由 build.yml 负责，避免重复。
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: ShellCheck（POSIX sh 脚本）
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+            -s sh -x \
+            rootfs/usr/local/bin/docker-entrypoint.sh \
+            rootfs/usr/local/bin/healthcheck.sh \
+            rootfs/usr/local/bin/qbt-lib.sh \
+            rootfs/etc/cont-init.d/00-identity \
+            rootfs/etc/cont-init.d/10-config \
+            rootfs/etc/cont-init.d/20-downloads \
+            rootfs/etc/services.d/qbittorrent/run \
+            rootfs/etc/services.d/qbittorrent/finish
+
+      - name: ShellCheck（bash 脚本）
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+            -s bash -x \
+            scripts/resolve-upstream.sh \
+            scripts/install-quadlet.sh \
+            scripts/check-dockerfile-runs.sh \
+            scripts/check-tracked-files.sh \
+            scripts/check-image-refs.sh \
+            scripts/dockerfile-arg.sh \
+            tests/smoke.sh \
+            tests/rootless.sh \
+            tests/resolve-upstream.sh
+
+      # 把每个 RUN 块抽出来交给 `sh -n`：拦截引号不闭合这类只有 build 才会暴露的错误
+      - name: Dockerfile RUN 语法检查
+        run: bash scripts/check-dockerfile-runs.sh Dockerfile
+
+      # .gitignore 一条 qbt-* 就曾把 rootfs/usr/local/bin/qbt-lib.sh 挡在仓库外，
+      # 本地能构建、CI 直接 chmod: No such file —— 用这个检查兜住
+      - name: 源文件是否都纳入版本控制
+        run: bash scripts/check-tracked-files.sh
+
+      # 镜像仓库名里含大写字母会让 docker/podman 直接报
+      # "repository name must be lowercase"，而这错只在部署时才暴露。
+      - name: 镜像引用检查（小写 + 全限定）
+        run: bash scripts/check-image-refs.sh
+
+      # 版本号只能有一个来源：Dockerfile 的 ARG 默认值
+      - name: 版本来源一致性
+        run: |
+          set -euo pipefail
+          ver="$(bash scripts/dockerfile-arg.sh Dockerfile QBITTORRENT_VERSION)"
+          s6="$(bash scripts/dockerfile-arg.sh Dockerfile S6_OVERLAY_VERSION)"
+          echo "上游版本：${ver} / s6-overlay：${s6}"
+          if ! [[ "${ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::QBITTORRENT_VERSION 格式异常：${ver}"
+            exit 1
+          fi
+          if ! [[ "${s6}" =~ ^3\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::S6_OVERLAY_VERSION 必须是 v3.x（本项目不兼容 v2）：${s6}"
+            exit 1
+          fi
+          if grep -qE 'S6_OVERLAY_VERSION=[0-9]' .github/workflows/build.yml; then
+            echo "::error::build.yml 里又写死了 S6_OVERLAY_VERSION，应从 Dockerfile 读取"
+            exit 1
+          fi
+
+      # 必须把仓库挂进去：hadolint 只会从「当前目录」读 .hadolint.yaml，
+      # 用 `< Dockerfile` 从 stdin 读时它找不到配置，DL3018 之类的忽略全部失效。
+      # 该镜像没有 ENTRYPOINT（只有 CMD hadolint），所以要把 hadolint 写成第一个参数。
+      - name: Hadolint
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt hadolint/hadolint:latest hadolint Dockerfile
+
+      - name: 校验 YAML / 单元测试
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          files = sorted(glob.glob('.github/workflows/*.yml')) + [
+              'docker-compose.yml', '.hadolint.yaml', '.github/dependabot.yml',
+          ]
+          for p in files:
+              try:
+                  yaml.safe_load(open(p, encoding='utf-8'))
+                  print('OK  ', p)
+              except Exception as e:
+                  bad = 1
+                  print('FAIL', p, e)
+          sys.exit(bad)
+          PY
+
+  unit:
+    name: 单元测试（身份解析 + 版本解析）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: 身份解析（uid_map 映射）
+        run: sh tests/identity.sh
+      - name: 版本解析（桩件，无需网络）
+        run: bash tests/resolve-upstream.sh
+
+  smoke:
+    name: 单架构构建 + 冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: 构建 amd64
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          pull: true
+          tags: qbittorrentee:ci
+          build-args: |
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 冒烟测试
+        env:
+          IMAGE: qbittorrentee:ci
+        run: bash tests/smoke.sh

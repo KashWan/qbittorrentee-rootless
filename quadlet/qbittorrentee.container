@@ -1,0 +1,82 @@
+# =============================================================================
+#  Quadlet 单元 · rootless Podman
+#
+#  安装位置（rootless，属于当前用户）：
+#      ~/.config/containers/systemd/qbittorrentee.container
+#  然后：
+#      systemctl --user daemon-reload
+#      systemctl --user start qbittorrentee
+#      systemctl --user enable qbittorrentee      # 开机自启（需要 lingering）
+#      loginctl enable-linger "$USER"             # 未登录时也能跑
+#
+#  注意：这是「用户级」单元，不要用 sudo，也不要用 systemctl --system。
+#        也可以直接跑 ./scripts/install-quadlet.sh 自动渲染。
+# =============================================================================
+
+[Unit]
+Description=qBittorrent Enhanced Edition (rootless · s6-overlay v3)
+Documentation=https://github.com/KashWan/qbittorrentee-rootless
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=qbittorrentee
+
+# 必须是全限定引用（registry/repo:tag）且全部小写：
+#   * 短名（qbittorrentee:latest）配 AutoUpdate=registry 会启动失败
+#   * 仓库名含大写字母时 docker/podman 报 "repository name must be lowercase"
+Image=ghcr.io/kashwan/qbittorrentee-rootless:latest
+AutoUpdate=registry
+
+# ---------------------------------------------------------------------------
+# rootless 的关键：容器内 root 已经映射成宿主上的「你」，
+# 所以这里刻意 不写 User= ，并用 PUID=0 PGID=0。
+# 写入 /config /downloads 的文件在宿主上属主就是你，容器内不做任何 chown。
+#
+# 若你运行的是 rootful Podman / Docker，请改成 PUID=<你的 uid> PGID=<你的 gid>。
+# ---------------------------------------------------------------------------
+Environment=PUID=0
+Environment=PGID=0
+Environment=UMASK=002
+Environment=WEBUI_PORT=8080
+Environment=BT_PORT=6881
+Environment=TZ=Asia/Shanghai
+# none | dir | recursive —— rootless 下恒为 no-op（属主天然正确）
+Environment=CHOWN_DOWNLOADS=none
+Environment=SEED_CONFIG=true
+Environment=QBITTORRENT_LOCALE=zh
+# 访问额外磁盘时填 gid 列表，例如 44,109
+#Environment=EXTRA_GROUPS=44,109
+
+PublishPort=8080:8080
+PublishPort=6881:6881
+PublishPort=6881:6881/udp
+
+# :Z 为 SELinux 重新打标签；非 SELinux 系统上无害
+Volume=%h/qbt/config:/config:Z
+Volume=%h/qbt/downloads:/downloads:Z
+
+HealthCmd=/usr/local/bin/healthcheck.sh
+HealthInterval=30s
+HealthTimeout=5s
+HealthStartPeriod=30s
+HealthRetries=3
+
+[Service]
+Restart=always
+# 必须大于 s6 的 S6_KILL_GRACETIME(15s)，否则 qBittorrent 来不及落盘 resume 数据
+TimeoutStopSec=70
+
+[Install]
+WantedBy=default.target
+
+# ---------------------------------------------------------------------------
+# 备选方案（不推荐）：--userns=keep-id
+# keep-id 让容器内 uid 等于宿主 uid，但 /init 就不再是 root，
+# s6-overlay 只能以「受限模式」运行，且必须给 /run 挂可写 tmpfs。形如：
+#
+#   UserNS=keep-id
+#   Tmpfs=/run:rw,exec,mode=0755
+#
+# 大多数场景没必要这么做——默认 userns 已经让容器 root 等于你本人。
+# ---------------------------------------------------------------------------

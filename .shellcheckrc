@@ -1,0 +1,8 @@
+# ShellCheck 配置（CI 与本地都从仓库根目录调用，会被自动读取）
+#
+# cont-init.d / services.d 里的脚本都用
+#   # shellcheck source=../../usr/local/bin/qbt-lib.sh
+# 指向仓库内的公共库。默认 ShellCheck 按「当前工作目录」解析这个相对路径，
+# 结果取决于从哪里调用；SCRIPTDIR 让它相对脚本自身所在目录解析，
+# 这样 /mnt/rootfs/... 和本地路径下都能正确找到 qbt-lib.sh。
+source-path=SCRIPTDIR

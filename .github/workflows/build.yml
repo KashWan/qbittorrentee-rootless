@@ -1,0 +1,233 @@
+name: build
+
+# =============================================================================
+#  上游有新版本时自动构建并推送；代码变更时重建 edge。
+#
+#  只构建 linux/amd64 —— 不使用 QEMU，构建耗时 ≈ 1 分钟。
+#
+#  流程：
+#    resolve  查上游版本 + 查 GHCR 是否已有 → 决定要不要构建
+#    build    构建（**不推送**，load 进本地 docker daemon）
+#    smoke    对本地镜像跑真实容器冒烟（tests/smoke.sh）
+#    push     冒烟通过后一次性推送全部标签（version / sha / edge / 5.2 / 5 / latest）
+#    rootless 用 rootless podman 再验一遍属主
+#
+#  为什么是「先冒烟后推送」：
+#    这样 latest / 5.2 / 5 永远不会指向一个没跑通的镜像。旧做法是用
+#    `buildx imagetools create` 在冒烟后再去改标签，那一步已经去掉 ——
+#    改成推送前先验证，pipeline 里不再有任何 registry manifest 操作。
+#
+#  版本来源：
+#    QBITTORRENT_VERSION 由 resolve 查上游得到；S6_OVERLAY_VERSION 默认取
+#    Dockerfile 的 ARG（scripts/dockerfile-arg.sh），只有手动触发时才覆盖。
+# =============================================================================
+
+on:
+  schedule:
+    # 每 6 小时检查一次上游（避开整点，减少 GitHub 调度拥堵）
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: "上游版本（留空=自动取最新，例如 5.2.4.10）"
+        required: false
+        default: ""
+      force_rebuild:
+        description: "强制重建，忽略已存在的同名标签"
+        type: boolean
+        default: false
+      s6_overlay_version:
+        description: "s6-overlay 版本（留空=用 Dockerfile 里的默认值）"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "rootfs/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/build.yml"
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 决定构建什么
+  # ---------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.r.outputs.build }}
+      version: ${{ steps.r.outputs.version }}
+      tag: ${{ steps.r.outputs.tag }}
+      image: ${{ steps.r.outputs.image }}
+      primary_ref: ${{ steps.r.outputs.primary_ref }}
+      push_tags: ${{ steps.r.outputs.push_tags }}
+      published_at: ${{ steps.r.outputs.published_at }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 解析上游版本与标签
+        id: r
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.upstream_version }}
+          FORCE: ${{ inputs.force_rebuild == true && 'true' || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/resolve-upstream.sh
+
+      - name: 输出摘要
+        run: |
+          {
+            echo "### 版本解析"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 是否构建 | \`${{ steps.r.outputs.build }}\` |"
+            echo "| 上游版本 | \`${{ steps.r.outputs.tag }}\` |"
+            echo "| 发布时间 | ${{ steps.r.outputs.published_at }} |"
+            echo "| 目标镜像 | \`${{ steps.r.outputs.primary_ref }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 2. 构建 → 冒烟 → 推送（linux/amd64）
+  # ---------------------------------------------------------------------------
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # S6_OVERLAY_VERSION 默认从 Dockerfile 读，避免 workflow 里再抄一份默认值
+      - name: 组装构建参数
+        id: args
+        env:
+          S6_INPUT: ${{ inputs.s6_overlay_version }}
+        run: |
+          set -euo pipefail
+          s6="${S6_INPUT}"
+          if [ -z "${s6}" ]; then
+            s6="$(bash scripts/dockerfile-arg.sh Dockerfile S6_OVERLAY_VERSION)"
+          fi
+          echo "s6-overlay 版本：${s6}"
+          {
+            echo "build_args<<__EOF__"
+            echo "QBITTORRENT_VERSION=${{ needs.resolve.outputs.version }}"
+            echo "S6_OVERLAY_VERSION=${s6}"
+            echo "IMAGE_SOURCE=https://github.com/${{ github.repository }}"
+            echo "VCS_REF=${{ github.sha }}"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 构建（不推送）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          pull: true
+          tags: ${{ needs.resolve.outputs.push_tags }}
+          build-args: ${{ steps.args.outputs.build_args }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # attestation（provenance/sbom）会往镜像里塞一层 manifest，
+          # 老版本 Podman（Ubuntu 22.04 自带 3.4）拉取时可能报
+          # "no image found in manifest list for architecture"。
+          # 单架构镜像不需要它，关掉保证各版本 podman 都能直接 pull。
+          provenance: false
+          sbom: false
+
+      - name: 冒烟测试（本地镜像，真实容器）
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          docker image inspect "${IMAGE}" >/dev/null
+          IMAGE="${IMAGE}" bash tests/smoke.sh
+
+      # 只有冒烟通过才会执行到这里，所以 latest 不会指向坏镜像
+      - name: 推送全部标签
+        env:
+          REFS: ${{ needs.resolve.outputs.push_tags }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${REFS}" | while read -r ref; do
+            [ -n "${ref}" ] || continue
+            echo "==> push ${ref}"
+            docker push "${ref}"
+          done
+
+      - name: 汇总
+        env:
+          REFS: ${{ needs.resolve.outputs.push_tags }}
+        run: |
+          {
+            echo "### 构建完成"
+            echo ""
+            echo "**上游版本**：\`${{ needs.resolve.outputs.tag }}\`"
+            echo ""
+            echo "**已推送标签**："
+            echo '```'
+            printf '%s\n' "${REFS}"
+            echo '```'
+            echo ""
+            echo "平台：linux/amd64"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 3. rootless Podman 验证（可选，环境不满足时自动跳过）
+  # ---------------------------------------------------------------------------
+  rootless:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 安装 podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman uidmap
+
+      - name: 拉取镜像（私有包需要登录，Public 包也能走这条路）
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          podman pull "${IMAGE}"
+
+      - name: rootless 冒烟
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          set +e
+          IMAGE="${IMAGE}" bash tests/rootless.sh
+          rc=$?
+          if [ "${rc}" -eq 77 ]; then
+            echo "::notice::跳过 rootless 测试（当前 runner 不支持 rootless podman）"
+            exit 0
+          fi
+          exit "${rc}"
