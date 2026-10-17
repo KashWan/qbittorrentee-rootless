@@ -1,0 +1,64 @@
+#!/bin/sh
+# =============================================================================
+#  20-downloads · 下载目录准备
+#
+#  CHOWN_DOWNLOADS 取值：
+#    none（默认）  只检查、不改属主 —— 适合下载目录里已有一堆数据、
+#                  且宿主机上已经由你本人持有属主的情况（rootless 最常见的形态）
+#    dir           只把 /downloads 这一层的属主改成运行身份
+#    recursive     递归修正 /downloads 下所有条目（数据量大时会慢，慎用）
+#
+#  兼容旧变量：true→dir，false→none，ENABLE_DOWNLOADS_PERM_FIX→dir
+# =============================================================================
+
+set -eu
+
+. "${QBT_LIB:-/usr/local/bin/qbt-lib.sh}"
+
+STATE_FILE="${QBT_STATE_DIR:-/run/qbittorrentee}/state.env"
+[ -r "${STATE_FILE}" ] || qbt_die "缺少 ${STATE_FILE}（00-identity 是否执行失败？）"
+# shellcheck disable=SC1090
+. "${STATE_FILE}"
+
+CHOWN_MODE="${CHOWN_DOWNLOADS:-${ENABLE_DOWNLOADS_PERM_FIX:-none}}"
+case "${CHOWN_MODE}" in
+	false|0|no|none)          CHOWN_MODE=none ;;
+	true|1|yes|dir)           CHOWN_MODE=dir ;;
+	recursive|all|always)     CHOWN_MODE=recursive ;;
+	*) qbt_warn "CHOWN_DOWNLOADS=${CHOWN_MODE} 无法识别，按 none 处理"; CHOWN_MODE=none ;;
+esac
+
+DL="${QBT_DOWNLOADS_DIR}"
+
+if [ ! -d "${DL}" ]; then
+	qbt_warn "下载目录 ${DL} 不存在，跳过权限处理"
+	exit 0
+fi
+
+mkdir -p "${DL}/incomplete" 2>/dev/null || qbt_warn "无法创建 ${DL}/incomplete"
+
+if [ "$(id -u)" -ne 0 ]; then
+	[ "${CHOWN_MODE}" = "none" ] || qbt_warn "非 root 启动，CHOWN_DOWNLOADS=${CHOWN_MODE} 无法执行"
+else
+	case "${CHOWN_MODE}" in
+		dir)
+			chown "${QBT_RUN_UID}:${QBT_RUN_GID}" "${DL}" "${DL}/incomplete" 2>/dev/null \
+				|| qbt_warn "chown ${DL} 失败（只读挂载 / NFS root_squash？）"
+			;;
+		recursive)
+			qbt_chown_tree "${DL}" "${QBT_RUN_UID}:${QBT_RUN_GID}" "${QBT_RUN_USER}" "${QBT_RUN_GROUP}" || true
+			;;
+	esac
+fi
+
+# 末了做一次可写性探测：不可写只告警，不阻断启动（WebUI 仍可用，方便排查）
+if [ "${QBT_SWITCH}" = "1" ]; then
+	/command/s6-setuidgid "${QBT_RUN_USER}" test -w "${DL}" 2>/dev/null || \
+		qbt_warn "${QBT_RUN_USER} 对 ${DL} 没有写权限；下载会失败。可在宿主执行：
+    sudo chown -R ${QBT_RUN_UID}:${QBT_RUN_GID} <宿主下载目录>
+  或设置 CHOWN_DOWNLOADS=dir / recursive 让容器自己修。"
+elif [ ! -w "${DL}" ]; then
+	qbt_warn "当前身份对 ${DL} 没有写权限；下载会失败。"
+fi
+
+qbt_log "下载目录：${DL}（属主策略：${CHOWN_MODE}）"

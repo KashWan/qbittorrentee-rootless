@@ -1,0 +1,66 @@
+#!/bin/sh
+# =============================================================================
+#  s6-overlay finish · qBittorrent 退出后的处置
+#
+#  s6 约定：
+#    exit 0    → 重启本服务
+#    exit 125  → 不再重启
+#  $1 = 退出码（被信号杀死时为 256）   $2 = 信号编号
+#
+#  策略：
+#    * 正常退出(0) / 被 TERM·INT·HUP 结束 → 停整个容器（符合容器语义）
+#    * 崩溃 → 最多重启 5 次；连续稳定运行超过 5 分钟则清零计数
+#    * 超过次数 → 停整个容器，避免无限 crash-loop 烧 CPU
+# =============================================================================
+
+STATE_DIR="${QBT_STATE_DIR:-/run/qbittorrentee}"
+code="${1:-0}"
+sig="${2:-0}"
+
+halt() {
+	# s6-overlay v3 使用 /run/service 作为 scan 目录；老版本在 /var/run/s6/services
+	if [ -d /run/s6-linux-init-container-results ]; then
+		printf '%s\n' "${1:-0}" > /run/s6-linux-init-container-results/exitcode 2>/dev/null || true
+	fi
+	/command/s6-svscanctl -t /run/service 2>/dev/null \
+		|| /command/s6-svscanctl -t /var/run/s6/services 2>/dev/null \
+		|| kill -TERM 1 2>/dev/null \
+		|| true
+	exit 125
+}
+
+# 被容器运行时正常停止
+case "${sig}" in
+	1|2|3|15) halt 0 ;;
+esac
+
+# 正常退出：qBittorrent 自己退出通常意味着用户显式停止
+if [ "${code}" -eq 0 ]; then
+	echo "[qbittorrent] 进程正常退出，容器随之停止" >&2
+	halt 0
+fi
+
+# 崩溃：算一下这次跑了多久
+now="$(date +%s)"
+started="0"
+[ -r "${STATE_DIR}/started_at" ] && started="$(cat "${STATE_DIR}/started_at" 2>/dev/null || echo 0)"
+case "${started}" in ''|*[!0-9]*) started=0 ;; esac
+
+count="0"
+[ -r "${STATE_DIR}/restarts" ] && count="$(cat "${STATE_DIR}/restarts" 2>/dev/null || echo 0)"
+case "${count}" in ''|*[!0-9]*) count=0 ;; esac
+
+if [ "${started}" -gt 0 ] && [ $((now - started)) -gt 300 ]; then
+	count=0
+fi
+
+count=$((count + 1))
+printf '%s\n' "${count}" > "${STATE_DIR}/restarts" 2>/dev/null || true
+
+if [ "${count}" -gt 5 ]; then
+	echo "[qbittorrent] 已连续崩溃 ${count} 次，停止容器以避免 crash-loop（查看日志定位原因）" >&2
+	halt 1
+fi
+
+echo "[qbittorrent] 异常退出（code=${code}），第 ${count}/5 次重启" >&2
+exit 0

@@ -1,0 +1,48 @@
+# =============================================================================
+#  docker compose / podman-compose
+#
+#  rootless Podman：把 PUID/PGID 改成 0（容器 root 即宿主当前用户）
+#  rootful Docker  ：保持 1000:1000，或改成你自己的 uid/gid
+# =============================================================================
+
+services:
+  qbittorrentee:
+    image: ghcr.io/YOUR_GITHUB_USER/qbittorrentee:latest
+    container_name: qbittorrentee
+    restart: unless-stopped
+
+    environment:
+      PUID: 1000
+      PGID: 1000
+      UMASK: "002"
+      WEBUI_PORT: 8080
+      TZ: Asia/Shanghai
+      # none | dir | recursive
+      CHOWN_DOWNLOADS: none
+      # 需要访问额外磁盘组时，填 gid 列表，账号会被加进这些组
+      # EXTRA_GROUPS: "44,109"
+
+    ports:
+      - "8080:8080"
+      - "6881:6881"
+      - "6881:6881/udp"
+
+    volumes:
+      - ./config:/config
+      - ./downloads:/downloads
+
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+    # 大于 s6 的 S6_KILL_GRACETIME(15s)
+    stop_grace_period: 70s
+
+    # cgroup 里 qBittorrent 会用到较多 fd
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536

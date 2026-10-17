@@ -1,0 +1,15 @@
+# 构建上下文裁剪：只保留镜像真正需要的东西
+.git
+.github
+docs
+quadlet
+tests
+scripts
+docker-compose.yml
+compose*.yaml
+Makefile
+.hadolint.yaml
+.gitignore
+LICENSE
+**/.DS_Store
+**/*.log

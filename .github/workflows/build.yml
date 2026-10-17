@@ -1,0 +1,197 @@
+name: build
+
+# =============================================================================
+#  上游有新版本时自动构建并推送；代码变更时重建 edge。
+#
+#  流程：resolve（查版本 + 查 GHCR 是否已有） → build（多架构推送，仅不可变
+#  标签） → 冒烟测试 → 冒烟通过后才把 5.2 / 5 / latest 指过去。
+#  这样 latest 永远不会指向一个没跑通的镜像。
+# =============================================================================
+
+on:
+  schedule:
+    # 每 6 小时检查一次上游（避开整点，减少 GitHub 调度拥堵）
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: "上游版本（留空=自动取最新，例如 5.2.4.10）"
+        required: false
+        default: ""
+      force_rebuild:
+        description: "强制重建，忽略已存在的同名标签"
+        type: boolean
+        default: false
+      s6_overlay_version:
+        description: "s6-overlay 版本（留空=用 Dockerfile 默认）"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "rootfs/**"
+      - "scripts/**"
+      - ".github/workflows/build.yml"
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 决定构建什么
+  # ---------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.r.outputs.build }}
+      version: ${{ steps.r.outputs.version }}
+      tag: ${{ steps.r.outputs.tag }}
+      image: ${{ steps.r.outputs.image }}
+      primary_ref: ${{ steps.r.outputs.primary_ref }}
+      tags: ${{ steps.r.outputs.tags }}
+      aliases: ${{ steps.r.outputs.aliases }}
+      published_at: ${{ steps.r.outputs.published_at }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析上游版本与标签
+        id: r
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.upstream_version }}
+          FORCE: ${{ inputs.force_rebuild == true && 'true' || 'false' }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/resolve-upstream.sh
+
+      - name: 输出摘要
+        run: |
+          {
+            echo "### 版本解析"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 是否构建 | \`${{ steps.r.outputs.build }}\` |"
+            echo "| 上游版本 | \`${{ steps.r.outputs.tag }}\` |"
+            echo "| 发布时间 | ${{ steps.r.outputs.published_at }} |"
+            echo "| 目标镜像 | \`${{ steps.r.outputs.primary_ref }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 2. 多架构构建 + 推送
+  # ---------------------------------------------------------------------------
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 启用 QEMU（arm64 / armv7）
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送（只推不可变标签）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          pull: true
+          tags: ${{ needs.resolve.outputs.tags }}
+          build-args: |
+            QBITTORRENT_VERSION=${{ needs.resolve.outputs.version }}
+            S6_OVERLAY_VERSION=${{ inputs.s6_overlay_version || '3.2.3.2' }}
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: 冒烟测试（在 amd64 上跑真实容器）
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}"
+          docker pull "${IMAGE}"
+          IMAGE="${IMAGE}" bash tests/smoke.sh
+
+      # 只有冒烟通过才会执行到这里，所以 latest 不会指向坏镜像
+      - name: 晋级别名标签（5.2 / 5 / latest）
+        env:
+          PRIMARY: ${{ needs.resolve.outputs.primary_ref }}
+          ALIASES: ${{ needs.resolve.outputs.aliases }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${ALIASES}" | while read -r ref; do
+            [ -n "${ref}" ] || continue
+            echo "==> ${ref} -> ${PRIMARY}"
+            docker buildx imagetools create -t "${ref}" "${PRIMARY}"
+          done
+
+      - name: 汇总
+        env:
+          PRIMARY: ${{ needs.resolve.outputs.primary_ref }}
+          ALIASES: ${{ needs.resolve.outputs.aliases }}
+        run: |
+          {
+            echo "### 构建完成"
+            echo ""
+            echo "**上游版本**：\`${{ needs.resolve.outputs.tag }}\`"
+            echo ""
+            echo "**镜像**："
+            echo '```'
+            echo "${PRIMARY}"
+            printf '%s\n' "${ALIASES}"
+            echo '```'
+            echo ""
+            echo "平台：linux/amd64 · linux/arm64 · linux/arm/v7"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 3. rootless Podman 验证（可选，环境不满足时自动跳过）
+  # ---------------------------------------------------------------------------
+  rootless:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 podman
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman uidmap
+
+      - name: rootless 冒烟
+        env:
+          IMAGE: ${{ needs.resolve.outputs.primary_ref }}
+        run: |
+          set +e
+          IMAGE="${IMAGE}" bash tests/rootless.sh
+          rc=$?
+          if [ "${rc}" -eq 77 ]; then
+            echo "::notice::跳过 rootless 测试（当前 runner 不支持 rootless podman）"
+            exit 0
+          fi
+          exit "${rc}"

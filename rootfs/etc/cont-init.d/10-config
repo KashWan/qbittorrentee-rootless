@@ -1,0 +1,112 @@
+#!/bin/sh
+# =============================================================================
+#  10-config · 准备 /config 目录树、落盘默认配置、安装搜索引擎插件
+#
+#  目录布局（由 qBittorrent 的 CustomProfile 决定，见 src/base/profile_p.cpp）：
+#      --profile=/config  ⇒  /config/qBittorrent/config/qBittorrent.conf
+#                            /config/qBittorrent/data/…        (resume、torrents、nova3)
+#                            /config/qBittorrent/cache/…
+#
+#  与旧镜像（superng6 / linuxserver）的差异只是多了一层 config/，
+#  下面会自动把 /config/qBittorrent/qBittorrent.conf 迁移过来。
+# =============================================================================
+
+set -eu
+
+. "${QBT_LIB:-/usr/local/bin/qbt-lib.sh}"
+
+STATE_FILE="${QBT_STATE_DIR:-/run/qbittorrentee}/state.env"
+[ -r "${STATE_FILE}" ] || qbt_die "缺少 ${STATE_FILE}（00-identity 是否执行失败？）"
+# shellcheck disable=SC1090
+. "${STATE_FILE}"
+
+TEMPLATE="${QBT_TEMPLATE:-/usr/local/share/qbittorrent/defaults/qBittorrent.conf}"
+
+PROFILE="${QBT_CONFIG_DIR}"
+BASE="${PROFILE}/qBittorrent"
+CONF_DIR="${BASE}/config"
+DATA_DIR="${BASE}/data"
+CACHE_DIR="${BASE}/cache"
+CONF="${CONF_DIR}/qBittorrent.conf"
+LEGACY_CONF="${BASE}/qBittorrent.conf"
+
+WEBUI_PORT="${WEBUI_PORT:-${WEBUIPORT:-8080}}"
+BT_PORT="${BT_PORT:-6881}"
+LOCALE="${QBITTORRENT_LOCALE:-zh}"
+SEED_CONFIG="${SEED_CONFIG:-true}"
+
+case "${WEBUI_PORT}" in ''|*[!0-9]*) qbt_die "WEBUI_PORT 必须是数字" ;; esac
+case "${BT_PORT}" in ''|*[!0-9]*) qbt_die "BT_PORT 必须是数字" ;; esac
+
+# -----------------------------------------------------------------------------
+# 1. 目录树
+# -----------------------------------------------------------------------------
+mkdir -p "${CONF_DIR}" "${DATA_DIR}/nova3/engines" "${DATA_DIR}/logs" "${CACHE_DIR}"
+
+# -----------------------------------------------------------------------------
+# 2. 从旧镜像迁移（superng6 / linuxserver 的布局）
+# -----------------------------------------------------------------------------
+if [ -f "${LEGACY_CONF}" ] && [ ! -f "${CONF}" ]; then
+	mv "${LEGACY_CONF}" "${CONF}"
+	qbt_log "已迁移旧配置 ${LEGACY_CONF} → ${CONF}"
+fi
+
+# -----------------------------------------------------------------------------
+# 3. 默认配置（仅首次）
+# -----------------------------------------------------------------------------
+if [ -f "${CONF}" ]; then
+	qbt_log "沿用已有配置：${CONF}"
+elif [ "${SEED_CONFIG}" = "false" ]; then
+	qbt_log "SEED_CONFIG=false，跳过默认配置写入"
+else
+	[ -r "${TEMPLATE}" ] || qbt_die "模板缺失：${TEMPLATE}"
+	tmp="${CONF}.tmp.$$"
+	sed \
+		-e "s|@@DOWNLOADS_DIR@@|$(printf '%s' "${QBT_DOWNLOADS_DIR}" | sed 's/[&|\\]/\\&/g')|g" \
+		-e "s|@@BASE_DIR@@|$(printf '%s' "${BASE}" | sed 's/[&|\\]/\\&/g')|g" \
+		-e "s|@@WEBUI_PORT@@|${WEBUI_PORT}|g" \
+		-e "s|@@BT_PORT@@|${BT_PORT}|g" \
+		-e "s|@@LOCALE@@|${LOCALE}|g" \
+		"${TEMPLATE}" > "${tmp}"
+	mv "${tmp}" "${CONF}"
+	qbt_log "已生成默认配置：${CONF}（WebUI 端口 ${WEBUI_PORT}）"
+fi
+
+# -----------------------------------------------------------------------------
+# 4. 搜索引擎插件
+# -----------------------------------------------------------------------------
+for src in /usr/local/share/qbittorrent/searchengines "${PROFILE}/searchengines"; do
+	[ -d "${src}" ] || continue
+	for f in "${src}"/*.py; do
+		[ -f "${f}" ] || continue
+		dst="${DATA_DIR}/nova3/engines/$(basename "${f}")"
+		if [ -f "${dst}" ]; then
+			continue
+		fi
+		cp "${f}" "${dst}"
+		qbt_log "已安装搜索插件：$(basename "${f}")"
+	done
+done
+
+# -----------------------------------------------------------------------------
+# 5. 权限修正（只在 /init 为 root 时可行）
+# -----------------------------------------------------------------------------
+if [ "$(id -u)" -eq 0 ]; then
+	qbt_chown_tree "${PROFILE}" "${QBT_RUN_UID}:${QBT_RUN_GID}" "${QBT_RUN_USER}" "${QBT_RUN_GROUP}" || true
+else
+	qbt_warn "非 root 启动，跳过 chown：${PROFILE}"
+fi
+
+# -----------------------------------------------------------------------------
+# 6. 以「真实运行身份」验证可写性 —— 早失败胜过硬跑
+# -----------------------------------------------------------------------------
+if [ "${QBT_SWITCH}" = "1" ]; then
+	if ! /command/s6-setuidgid "${QBT_RUN_USER}" test -w "${CONF_DIR}"; then
+		qbt_die "${QBT_RUN_USER}（uid=${QBT_RUN_UID}）无法写入 ${CONF_DIR}。
+  可能原因：绑定挂载为只读、NFS root_squash、SELinux 标签不匹配。
+  排查： ls -ld ${PROFILE}; mount | grep ${PROFILE}"
+	fi
+elif [ ! -w "${CONF_DIR}" ]; then
+	qbt_die "当前身份（uid=$(id -u)）无法写入 ${CONF_DIR}。
+  非 root 启动时请在宿主上预先 chown 该目录，或去掉 --user 让 /init 以 root 运行。"
+fi

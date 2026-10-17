@@ -1,0 +1,184 @@
+#!/bin/sh
+# =============================================================================
+#  00-identity · s6-overlay stage2 第 1 步
+#
+#  解决上游镜像 "PUID/PGID 配置不生效" 的根因，并覆盖三种启动场景：
+#
+#    privileged    rootful docker/podman：/init 以 root 运行，uid_map 为完整映射
+#                  → PUID/PGID 默认 1000:1000，可任意指定，chown + 降权都做
+#    rootless      rootless podman（默认 userns）：容器内 root 已映射到宿主当前
+#                  用户，uid 1000 会映射到 subuid（如 101000）
+#                  → 默认 PUID=PGID=0（以容器 root 运行 = 宿主当前用户）
+#    unprivileged  --user / keep-id / K8s runAsNonRoot：/init 不是 root
+#                  → 无法 chown，也无法降权，直接以当前身份运行并明确告警
+#
+#  输出：/run/qbittorrentee/state.env，供 10-config、20-downloads 与 run 脚本读取
+# =============================================================================
+
+set -eu
+
+. "${QBT_LIB:-/usr/local/bin/qbt-lib.sh}"
+
+STATE_DIR="${QBT_STATE_DIR:-/run/qbittorrentee}"
+STATE_FILE="${STATE_DIR}/state.env"
+CONFIG_DIR="${CONFIG_DIR:-/config}"
+DOWNLOADS_DIR="${DOWNLOADS_DIR:-/downloads}"
+
+mkdir -p "${STATE_DIR}"
+chmod 0755 "${STATE_DIR}"
+
+INIT_UID="$(id -u)"
+INIT_GID="$(id -g)"
+
+# -----------------------------------------------------------------------------
+# 1. 场景判定
+# -----------------------------------------------------------------------------
+USERNS=0
+HOST_ROOT_UID=""
+if in_userns; then
+	USERNS=1
+	HOST_ROOT_UID="$(map_forward "$(qbt_uid_map)" 0 2>/dev/null || echo "")"
+fi
+
+if [ "${INIT_UID}" -ne 0 ]; then
+	SCENARIO=unprivileged
+elif [ "${USERNS}" -eq 1 ] && [ -n "${HOST_ROOT_UID}" ] && [ "${HOST_ROOT_UID}" != "0" ]; then
+	SCENARIO=rootless
+else
+	SCENARIO=privileged
+fi
+
+case "${SCENARIO}" in
+	privileged)   DEF_UID=1000;      DEF_GID=1000 ;;
+	rootless)     DEF_UID=0;         DEF_GID=0 ;;
+	unprivileged) DEF_UID=${INIT_UID}; DEF_GID=${INIT_GID} ;;
+esac
+
+# -----------------------------------------------------------------------------
+# 2. PUID / PGID 解析
+# -----------------------------------------------------------------------------
+PUID="${PUID:-}"
+PGID="${PGID:-}"
+
+[ -n "${PUID}" ] || PUID="${DEF_UID}"
+[ -n "${PGID}" ] || PGID="${DEF_GID}"
+
+case "${PUID}" in ''|*[!0-9]*) qbt_die "PUID 必须是纯数字，当前为 '${PUID}'" ;; esac
+case "${PGID}" in ''|*[!0-9]*) qbt_die "PGID 必须是纯数字，当前为 '${PGID}'" ;; esac
+
+UMASK_RAW="${UMASK:-${UMASK_SET:-022}}"
+if ! UMASK="$(qbt_normalize_umask "${UMASK_RAW}")"; then
+	qbt_die "UMASK 必须是八进制数（如 022），当前为 '${UMASK_RAW}'"
+fi
+
+# -----------------------------------------------------------------------------
+# 3. 明确告诉用户「你设的 PUID 在宿主上会变成谁」
+# -----------------------------------------------------------------------------
+if [ "${SCENARIO}" = "rootless" ] && [ "${PUID}" -ne 0 ]; then
+	if MAP_UID="$(map_forward "$(qbt_uid_map)" "${PUID}" 2>/dev/null)"; then
+		MAP_UID="宿主 uid ${MAP_UID}"
+	else
+		MAP_UID="未映射（该 uid 在容器内不可用）"
+	fi
+	qbt_warn "rootless userns 下 PUID=${PUID} 对应 ${MAP_UID}，不是你自己。"
+	qbt_warn "rootless 场景请用 PUID=0 PGID=0：容器内 root 即宿主 uid=${HOST_ROOT_UID}。"
+	qbt_warn "若必须用 PUID=${PUID}，请在宿主机执行： podman unshare chown -R ${PUID}:${PGID} <目录>"
+fi
+
+# -----------------------------------------------------------------------------
+# 4. 决定「以谁的身份运行」
+# -----------------------------------------------------------------------------
+if [ "${SCENARIO}" = "unprivileged" ]; then
+	if [ "${PUID}" -ne "${INIT_UID}" ] || [ "${PGID}" -ne "${INIT_GID}" ]; then
+		qbt_warn "当前以非 root（uid=${INIT_UID} gid=${INIT_GID}）启动，无法切换到 PUID=${PUID} PGID=${PGID}。"
+		qbt_warn "PUID/PGID 已被忽略；如需生效，请去掉 --user / keep-id，让 /init 以 root 启动。"
+	fi
+	RUN_UID="${INIT_UID}"
+	RUN_GID="${INIT_GID}"
+	RUN_USER="$(id -un 2>/dev/null || echo unknown)"
+	RUN_GROUP="$(awk -F: -v g="${RUN_GID}" '$3==g {print $1; exit}' /etc/group 2>/dev/null || true)"
+	[ -n "${RUN_GROUP}" ] || RUN_GROUP="${RUN_GID}"
+	SWITCH=0
+elif [ "${PUID}" -eq 0 ]; then
+	RUN_UID=0
+	RUN_GID=0
+	RUN_USER=root
+	RUN_GROUP=root
+	SWITCH=0
+else
+	RUN_GROUP="$(qbt_ensure_group "${PGID}")" || qbt_die "无法创建 gid=${PGID} 的组"
+	RUN_USER="$(qbt_ensure_user "${PUID}" "${PGID}" "${RUN_GROUP}" "${CONFIG_DIR}")" \
+		|| qbt_die "无法创建 uid=${PUID} gid=${PGID} 的账号"
+	RUN_UID="${PUID}"
+	RUN_GID="${PGID}"
+	SWITCH=1
+fi
+
+# -----------------------------------------------------------------------------
+# 5. 补充组（EXTRA_GROUPS=44,109）
+#    直接把账号加进这些组，s6-setuidgid 的 initgroups 会自动带上，
+#    不需要 setpriv 之类的工具，也不引入额外依赖。
+# -----------------------------------------------------------------------------
+EXTRA_GROUPS="${EXTRA_GROUPS:-}"
+if [ -n "${EXTRA_GROUPS}" ] && [ "${SWITCH}" = "1" ]; then
+	for g in $(printf '%s' "${EXTRA_GROUPS}" | tr ',' ' '); do
+		case "${g}" in ''|*[!0-9]*) qbt_warn "EXTRA_GROUPS 中的 '${g}' 不是数字，已跳过"; continue ;; esac
+		gname="$(qbt_ensure_group "${g}")" || { qbt_warn "无法创建 gid=${g} 的组，已跳过"; continue; }
+		adduser "${RUN_USER}" "${gname}" >/dev/null 2>&1 || qbt_warn "无法把 ${RUN_USER} 加入组 ${gname}"
+	done
+	qbt_log "补充组：${EXTRA_GROUPS}"
+fi
+
+# -----------------------------------------------------------------------------
+# 6. 目录可用性检查（早失败，给出可执行建议）
+# -----------------------------------------------------------------------------
+if ! mkdir -p "${CONFIG_DIR}" 2>/dev/null; then
+	qbt_die "无法创建 ${CONFIG_DIR}。
+  当前身份：uid=${INIT_UID} gid=${INIT_GID}（场景：${SCENARIO}）
+  rootless podman 下请确认宿主目录属于你本人：ls -ld <宿主目录>
+  或先修复属主：podman unshare chown -R ${INIT_UID}:${INIT_GID} <宿主目录>"
+fi
+
+if ! mkdir -p "${DOWNLOADS_DIR}" 2>/dev/null; then
+	qbt_warn "无法创建 ${DOWNLOADS_DIR}（挂载点缺失或只读）。下载功能会失败，但 WebUI 仍可访问。"
+fi
+
+# -----------------------------------------------------------------------------
+# 7. 落盘状态
+# -----------------------------------------------------------------------------
+cat > "${STATE_FILE}" <<EOF
+QBT_SCENARIO=${SCENARIO}
+QBT_USERNS=${USERNS}
+QBT_HOST_ROOT_UID=${HOST_ROOT_UID:-0}
+QBT_RUN_UID=${RUN_UID}
+QBT_RUN_GID=${RUN_GID}
+QBT_RUN_USER=${RUN_USER}
+QBT_RUN_GROUP=${RUN_GROUP}
+QBT_SWITCH=${SWITCH}
+QBT_UMASK=${UMASK}
+QBT_CONFIG_DIR="${CONFIG_DIR}"
+QBT_DOWNLOADS_DIR="${DOWNLOADS_DIR}"
+EOF
+chmod 0644 "${STATE_FILE}"
+
+# -----------------------------------------------------------------------------
+# 8. 人类可读的总结
+# -----------------------------------------------------------------------------
+case "${SCENARIO}" in
+	privileged)
+		qbt_log "场景：rootful（完整 uid 映射）" ;;
+	rootless)
+		qbt_log "场景：rootless userns（容器 root → 宿主 uid=${HOST_ROOT_UID}）" ;;
+	unprivileged)
+		qbt_log "场景：非 root 启动（uid 映射受限，已跳过 chown/降权）" ;;
+esac
+
+if [ "${SWITCH}" = "1" ]; then
+	qbt_log "运行身份：${RUN_USER}（uid=${RUN_UID} gid=${RUN_GID}）· 由 s6-setuidgid 降权 · umask=${UMASK}"
+else
+	qbt_log "运行身份：${RUN_USER}（uid=${RUN_UID} gid=${RUN_GID}）· 不降权 · umask=${UMASK}"
+fi
+
+if [ "${SCENARIO}" = "rootless" ] && [ "${RUN_UID}" -eq 0 ]; then
+	qbt_log "提示：容器内 root 就是宿主机上的你（uid=${HOST_ROOT_UID}），写入的文件在宿主上属主正确。"
+fi

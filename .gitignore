@@ -1,0 +1,19 @@
+# 运行时数据
+/config/
+/downloads/
+data/
+
+# 本地构建产物
+*.tar
+*.tar.xz
+*.zip
+qbt-*
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 测试临时目录
+/tmp/

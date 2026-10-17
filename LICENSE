@@ -1,0 +1,33 @@
+qbittorrentee — 自建 qBittorrent Enhanced Edition 容器镜像
+Copyright (C) 2026  contributors
+
+本项目的 Dockerfile、shell 脚本与文档以 GNU General Public License
+version 2 或（由你选择）任何更新版本授权发布（GPL-2.0-or-later）。
+
+完整许可证文本见：https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+
+------------------------------------------------------------------
+镜像内打包的第三方组件及其许可证
+------------------------------------------------------------------
+
+1. qBittorrent Enhanced Edition
+   https://github.com/c0re100/qBittorrent-Enhanced-Edition
+   GPL-2.0-or-later，以静态链接的 qbittorrent-nox 二进制形式分发。
+   对应的源码可从上述仓库获取。
+
+2. s6-overlay
+   https://github.com/just-containers/s6-overlay
+   ISC License（s6、s6-rc、execline、skalibs 等 skarnet 组件）。
+
+3. Alpine Linux 基础镜像及其软件包
+   https://alpinelinux.org
+   MIT / BSD / GPL 等，详见各软件包元数据。
+
+------------------------------------------------------------------
+免责声明
+------------------------------------------------------------------
+
+本程序按"原样"提供，不附带任何明示或暗示的担保，包括但不限于对适销性和
+特定用途适用性的担保。详见 GNU General Public License。
+
+本镜像仅用于个人合法的 BitTorrent 用途。使用者应自行遵守所在地区法律。

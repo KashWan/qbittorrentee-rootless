@@ -1,0 +1,101 @@
+name: validate
+
+# 只在 PR 与手动触发时跑：main 的构建/测试由 build.yml 负责，避免重复。
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ShellCheck（POSIX sh 脚本）
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+            -s sh \
+            rootfs/usr/local/bin/docker-entrypoint.sh \
+            rootfs/usr/local/bin/healthcheck.sh \
+            rootfs/usr/local/bin/qbt-lib.sh \
+            rootfs/etc/cont-init.d/00-identity \
+            rootfs/etc/cont-init.d/10-config \
+            rootfs/etc/cont-init.d/20-downloads \
+            rootfs/etc/services.d/qbittorrent/run \
+            rootfs/etc/services.d/qbittorrent/finish
+
+      - name: ShellCheck（bash 脚本）
+        run: |
+          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:stable \
+            -s bash -x \
+            scripts/resolve-upstream.sh \
+            scripts/install-quadlet.sh \
+            tests/smoke.sh \
+            tests/rootless.sh \
+            tests/resolve-upstream.sh
+
+      - name: Hadolint
+        run: |
+          docker run --rm -i hadolint/hadolint:latest < Dockerfile
+
+      - name: 校验 YAML / 单元测试
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          files = sorted(glob.glob('.github/workflows/*.yml')) + [
+              'docker-compose.yml', '.hadolint.yaml', '.github/dependabot.yml',
+          ]
+          for p in files:
+              try:
+                  yaml.safe_load(open(p, encoding='utf-8'))
+                  print('OK  ', p)
+              except Exception as e:
+                  bad = 1
+                  print('FAIL', p, e)
+          sys.exit(bad)
+          PY
+
+  unit:
+    name: 单元测试（身份解析 + 版本解析）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 身份解析（uid_map 映射）
+        run: sh tests/identity.sh
+      - name: 版本解析（桩件，无需网络）
+        run: bash tests/resolve-upstream.sh
+
+  smoke:
+    name: 单架构构建 + 冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 构建 amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          pull: true
+          tags: qbittorrentee:ci
+          build-args: |
+            IMAGE_SOURCE=https://github.com/${{ github.repository }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 冒烟测试
+        env:
+          IMAGE: qbittorrentee:ci
+        run: bash tests/smoke.sh
