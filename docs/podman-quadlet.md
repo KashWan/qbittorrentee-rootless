@@ -53,7 +53,7 @@ loginctl enable-linger "$USER"
 ```bash
 mkdir -p ~/.config/containers/systemd ~/qbt/config ~/qbt/downloads
 cp quadlet/qbittorrentee.container ~/.config/containers/systemd/
-# 把里面的 YOUR_GITHUB_USER 换成你的用户名
+# 模板里的镜像地址已预填，也可用 --image 覆盖
 systemctl --user daemon-reload
 systemctl --user start qbittorrentee
 systemctl --user enable qbittorrentee

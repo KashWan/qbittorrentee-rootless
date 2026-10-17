@@ -3,7 +3,7 @@
 #  tests/smoke.sh · 对已构建镜像做真实容器验证
 #
 #  用法：
-#      IMAGE=ghcr.io/you/qbittorrentee:5.2.4.10 bash tests/smoke.sh
+#      IMAGE=ghcr.io/you/qbittorrentee-rootless:5.2.4.10 bash tests/smoke.sh
 #      IMAGE=qbittorrentee:test RUNTIME=podman bash tests/smoke.sh
 #
 #  用例：
