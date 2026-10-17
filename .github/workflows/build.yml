@@ -64,7 +64,7 @@ jobs:
       aliases: ${{ steps.r.outputs.aliases }}
       published_at: ${{ steps.r.outputs.published_at }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 解析上游版本与标签
         id: r
@@ -96,7 +96,7 @@ jobs:
     if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v3
 
@@ -177,7 +177,7 @@ jobs:
     if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 podman
         run: |
