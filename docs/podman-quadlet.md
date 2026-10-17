@@ -37,7 +37,7 @@ loginctl enable-linger "$USER"
 
 ```bash
 ./scripts/install-quadlet.sh \
-  --image ghcr.io/<你的用户名>/qbittorrentee:latest
+  --image ghcr.io/KashWan/qbittorrentee:latest
 ```
 
 它会：建 `~/qbt/{config,downloads}` → 渲染单元到 `~/.config/containers/systemd/` → `daemon-reload` → 启动。
