@@ -69,6 +69,8 @@ check:
 	@echo "== 版本来源 =="
 	@make --no-print-directory versions
 	@make --no-print-directory identity
+	@echo "== GitHub Release 发布逻辑（桩件，离线）=="
+	@bash tests/publish-release.sh
 
 # 与 .github/workflows/validate.yml 的 lint job 逐条对齐：
 # 本地跑一遍就和 CI 的结论一致，避免 push 之后才发现 shellcheck/hadolint 报错
@@ -91,9 +93,11 @@ lint:
 	  scripts/check-tracked-files.sh \
 	  scripts/check-image-refs.sh \
 	  scripts/dockerfile-arg.sh \
+	  scripts/publish-release.sh \
 	  tests/smoke.sh \
 	  tests/rootless.sh \
-	  tests/resolve-upstream.sh
+	  tests/resolve-upstream.sh \
+	  tests/publish-release.sh
 	@echo "== hadolint（挂载仓库以读取 .hadolint.yaml）=="
 	@docker run --rm -v "$$PWD:/mnt" -w /mnt hadolint/hadolint:latest hadolint Dockerfile
 

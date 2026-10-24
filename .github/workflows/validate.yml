@@ -41,9 +41,11 @@ jobs:
             scripts/check-tracked-files.sh \
             scripts/check-image-refs.sh \
             scripts/dockerfile-arg.sh \
+            scripts/publish-release.sh \
             tests/smoke.sh \
             tests/rootless.sh \
-            tests/resolve-upstream.sh
+            tests/resolve-upstream.sh \
+            tests/publish-release.sh
 
       # 把每个 RUN 块抽出来交给 `sh -n`：拦截引号不闭合这类只有 build 才会暴露的错误
       - name: Dockerfile RUN 语法检查
@@ -113,6 +115,8 @@ jobs:
         run: sh tests/identity.sh
       - name: 版本解析（桩件，无需网络）
         run: bash tests/resolve-upstream.sh
+      - name: Release 发布逻辑（桩件，无需网络）
+        run: bash tests/publish-release.sh
 
   smoke:
     name: 单架构构建 + 冒烟

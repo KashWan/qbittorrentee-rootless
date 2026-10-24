@@ -96,6 +96,9 @@ systemctl --user status qbittorrentee
 
 包是公开的，`podman pull` / `docker pull` 无需登录。
 
+每个上游版本还会在 [Releases](https://github.com/KashWan/qbittorrentee-rootless/releases)
+建一个同号发布（tag 就是 `5.2.4.10`），想看「上游什么时候发了新版」盯那里即可。
+
 ---
 
 ## 配置

@@ -1,7 +1,7 @@
 # CI/CD：流水线、标签策略与发版
 
-三件事：**怎么构建**、**什么时候推送**、**标签怎么取**。
-你只是使用镜像的话，看第 7 节标签策略就够；要改仓库或发版，从第 1 节看起。
+三件事：**怎么构建**、**什么时候推送**、**版本怎么标**。
+你只是使用镜像的话，看第 7 节标签策略和第 8 节 Release 就够；要改仓库或排查流水线，从第 1 节看起。
 
 ---
 
@@ -14,12 +14,19 @@ schedule  23 */6 * * *        每 6 小时查一次上游
 workflow_dispatch             手动触发（可指定版本 / 强制重建 / 指定 s6 版本）
 push(main) / tag v*           代码或标签变更
 
-  ┌──────────┐   ┌───────────────┐   ┌────────────┐   ┌──────────┐   ┌──────────┐
-  │ resolve  │──►│ build         │──►│ smoke      │──►│ push     │──►│ rootless │
-  │ 查版本   │   │ 构建 amd64    │   │ 真实容器   │   │ 推全部   │   │ podman   │
-  │ 查是否已 │   │ **不推送**    │   │ 冒烟 A/B/C │   │ 标签     │   │ 再验一遍 │
-  │ 存在     │   │ load 到本地   │   │ + D        │   │          │   │          │
-  └──────────┘   └───────────────┘   └────────────┘   └──────────┘   └──────────┘
+  ┌──────────┐   ┌───────────────┐   ┌────────────┐   ┌──────────┐
+  │ resolve  │──►│ build         │──►│ smoke      │──►│ push     │
+  │ 查版本   │   │ 构建 amd64    │   │ 真实容器   │   │ 推全部   │
+  │ 查是否已 │   │ **不推送**    │   │ 冒烟 A/B/C │   │ 标签     │
+  │ 存在     │   │ load 到本地   │   │ + D        │   │          │
+  └──────────┘   └───────────────┘   └────────────┘   └──────────┘
+                                                           │
+                                                           ▼
+                                          ┌────────────┐  ┌────────────┐
+                                          │ rootless   │─►│ release    │
+                                          │ podman     │  │ GitHub     │
+                                          │ 再验一遍   │  │ Release    │
+                                          └────────────┘  └────────────┘
 ```
 
 只在 **linux/amd64** 上构建与测试，不使用 QEMU。单次构建约 1 分钟。
@@ -119,7 +126,88 @@ workflow 里不再抄一份默认值 —— 两处默认值分叉是这类项目
 
 ---
 
-## 8. 几个设计取舍
+## 8. GitHub Release
+
+镜像标签只在 GHCR 里，Registries 页面的标签列表不适合用来观察「上游什么时候发了新版」。
+所以每次上游出现新版本、且构建与全部测试通过后，`release` job 会在仓库里建一个
+**与该版本同号的 Release**：
+
+```
+Release tag   5.2.4.10        ← 与镜像不可变标签同名
+Release 标题  5.2.4.10
+指向 commit   触发出这次构建的 main 提交
+```
+
+Releases 页面因此成为一条按版本排好的时间线，`/releases/latest` 直接指向当前版本。
+
+### 为什么 tag 不带 `v` 前缀
+
+`build.yml` 的 `on.push.tags` 里有 `v*`。若 Release tag 叫 `v5.2.4.10`，
+任何一次手动 `git push tag` 都会额外触发一整轮完整构建（GitHub 对 tag push
+不评估 `paths` 过滤）。纯版本号不匹配 `v*`，没有这层耦合。
+
+第二道保险：CI 用 `GITHUB_TOKEN` 创建的 tag 本身不会触发新的 workflow run ——
+这是 GitHub 的既定行为，但我们不依赖它，前缀隔离是更明确的那道。
+
+### 什么时候创建、什么时候跳过
+
+| 场景 | `build` | Release |
+|---|---|---|
+| 上游发了新版本（schedule 或手动发现） | 跑 | **创建** |
+| `push` 到 `main`（重建同一版本） | 跑 | 已存在 → 跳过 |
+| 推 `v*` tag（如 `v0.1.0`） | 跑 | 已存在 → 跳过 |
+| 上游无新版本（schedule 空跑） | 跳过 | 不执行 |
+| 冒烟或 rootless 失败 | 跑但失败 | **不执行**（`needs` 里带了 rootless） |
+
+`scripts/publish-release.sh` 自身是幂等的：先 `gh release view` 探一次，
+存在就打印「已存在，跳过」并退出 0。所以重复构建不会产生重复 Release，
+也不会把已经写好的发布说明覆盖掉。
+
+`--latest` 只在**本次版本大于已有最大版本**时才传。手动 `force_rebuild`
+一个旧版本不会把 Releases 页面的 Latest 指回旧版 —— 镜像的 `latest` 标签
+也是同样的判定顺序。
+
+### Release 里写了什么
+
+| 内容 | 来源 |
+|---|---|
+| 上游版本链接 | `https://github.com/c0re100/.../releases/tag/release-x.y.z.w` |
+| 上游发布时间 | 上游 API 的 `published_at` |
+| 镜像 digest | build job 的 `docker buildx imagetools inspect` 输出 |
+| 拉取命令 | `docker pull` / `podman pull` 各一行 |
+| 本次推送的镜像标签 | resolve 的 `push_tags`，只列短名（`5.2.4.10` / `latest` / `edge` …） |
+
+生成逻辑在 `scripts/publish-release.sh`，说明用 `printf` 逐段拼装 ——
+Release 正文里含 ``` 代码块，heredoc 会把反引号当命令替换，引号包裹的 heredoc
+又无法展开变量，两者都不合适。
+
+### 手动补发
+
+Release 只跟着构建走，`build=false` 时不会单独执行。要给一个已构建过的版本补发：
+
+```
+Actions → build → Run workflow → force_rebuild = true
+```
+
+会重建镜像（覆盖同名标签，digest 可能变化）并创建 Release。若只想看说明
+不实际创建，本地可以这样验证：
+
+```bash
+VERSION=5.2.4.10 DRY_RUN=true REPO=owner/repo bash scripts/publish-release.sh
+```
+
+### 删除与重发
+
+Release 页面删除后，tag 会保留（GitHub 默认行为）。下次 `force_rebuild`
+时会因「tag 已存在」而省略 `--target`，直接复用现有 tag 创建 Release。
+若想把 tag 也一起重置，先在仓库 Tags 页面删除 tag 再走上面补发流程。
+
+`tests/publish-release.sh` 用桩件覆盖了幂等、`--latest` 判定、`--target` 省略
+三类分支，离线可跑。
+
+---
+
+## 9. 几个设计取舍
 
 | 决定 | 原因 |
 |---|---|
@@ -132,7 +220,7 @@ workflow 里不再抄一份默认值 —— 两处默认值分叉是这类项目
 
 ---
 
-## 9. 手动触发
+## 10. 手动触发
 
 Actions → `build` → Run workflow：
 
@@ -144,7 +232,7 @@ Actions → `build` → Run workflow：
 
 ---
 
-## 10. validate.yml 检查了什么
+## 11. validate.yml 检查了什么
 
 只在 PR 与手动触发时跑（`main` 的构建/测试由 `build.yml` 负责，避免重复）。
 
@@ -163,7 +251,7 @@ Actions → `build` → Run workflow：
 
 ---
 
-## 11. 维护者需要人工确认的两件事
+## 12. 维护者需要人工确认的两件事
 
 1. **包可见性**：GHCR 新包的默认可见性跟着仓库走。若 `podman pull` 返回 401，
    去 `Packages → qbittorrentee-rootless → Package settings → Change visibility` 改成 `Public`。
@@ -180,7 +268,7 @@ Actions → `build` → Run workflow：
 
 ---
 
-## 12. 本地复现 CI
+## 13. 本地复现 CI
 
 ```bash
 make check     # sh/bash 语法 + Dockerfile RUN 块 + 镜像引用 + 文件追踪 + 单元测试（无需网络）
@@ -192,7 +280,7 @@ make versions  # 显示将从 Dockerfile 使用的上游 / s6-overlay 版本
 
 ---
 
-## 13. 版本历史
+## 14. 版本历史
 
 镜像版本 = 上游 qBittorrent Enhanced Edition 的版本号。
 

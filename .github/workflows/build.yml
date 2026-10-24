@@ -11,11 +11,17 @@ name: build
 #    smoke    对本地镜像跑真实容器冒烟（tests/smoke.sh）
 #    push     冒烟通过后一次性推送全部标签（version / sha / edge / 5.2 / 5 / latest）
 #    rootless 用 rootless podman 再验一遍属主
+#    release  全部验证通过后创建 GitHub Release，tag 与上游版本号同名
 #
 #  为什么是「先冒烟后推送」：
 #    这样 latest / 5.2 / 5 永远不会指向一个没跑通的镜像。旧做法是用
 #    `buildx imagetools create` 在冒烟后再去改标签，那一步已经去掉 ——
 #    改成推送前先验证，pipeline 里不再有任何 registry manifest 操作。
+#
+#  Release 的 tag 是纯版本号（5.2.4.10），不带 v 前缀：
+#    本文件的 on.push.tags 里有 "v*"，若 Release 也叫 v5.2.4.10，任何一次
+#    手动推 tag 都会多触发一轮完整构建。纯版本号既避开这个耦合，又与镜像的
+#    不可变标签同名，便于对照观察上游版本更新。
 #
 #  版本来源：
 #    QBITTORRENT_VERSION 由 resolve 查上游得到；S6_OVERLAY_VERSION 默认取
@@ -107,6 +113,8 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.value }}
     steps:
       - uses: actions/checkout@v7
 
@@ -178,6 +186,20 @@ jobs:
             docker push "${ref}"
           done
 
+      # Release 说明里要写 digest。六个标签指向同一 digest，取不可变的
+      # version 标签即可。--format 输出不带换行，统一 tr 掉再喂给 GITHUB_OUTPUT。
+      - name: 记录镜像 digest
+        id: digest
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          value="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+            --format '{{.Manifest.Digest}}' | tr -d '[:space:]')"
+          echo "digest: ${value}"
+          echo "value=${value}" >>"$GITHUB_OUTPUT"
+
       - name: 汇总
         env:
           REFS: ${{ needs.resolve.outputs.push_tags }}
@@ -231,3 +253,49 @@ jobs:
             exit 0
           fi
           exit "${rc}"
+
+  # ---------------------------------------------------------------------------
+  # 4. 创建 GitHub Release（tag = 上游版本号，与镜像不可变标签同名）
+  #
+  #    needs 里带上 rootless：只有冒烟 + rootless 全过才发版。
+  #    build 为 false 时整个 job 跳过 —— 没构建就没有新版本可发。
+  #    脚本自身是幂等的：同名 Release 已存在就直接退出，所以 push 到 main
+  #    触发的重复重建不会产生重复 Release。
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [resolve, build, rootless]
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    # 顶层是 contents: read，创建 Release 需要 write，job 级覆盖
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.tag }}
+          PUBLISHED_AT: ${{ needs.resolve.outputs.published_at }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          REFS: ${{ needs.resolve.outputs.push_tags }}
+        run: bash scripts/publish-release.sh
+
+      - name: 汇总
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          {
+            echo "### GitHub Release"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| Release tag | \`${VERSION}\` |"
+            echo "| 指向 commit | \`${GITHUB_SHA}\` |"
+            echo "| Digest | \`${DIGEST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
